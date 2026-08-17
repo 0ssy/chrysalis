@@ -50,4 +50,4 @@ int main() {
 
     cudaFree(d_balance);
     return 0;
-}s
+}

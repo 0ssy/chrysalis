@@ -18,42 +18,33 @@
 // parse (handled outside, building the Item list), conflict_check
 // (derived automatically from touches(), see below), apply (apply()).
 
-// PRECOMPUTE DEPENDENCIES: for each item, find the nearest earlier
-// item touching any of the same resources. Same idea as before, now
-// generalized to "however many resources a domain's items touch"
-// instead of hardcoded to exactly two (from/to).
+// PRECOMPUTE DEPENDENCIES: for each item, track one dependency per
+// touched resource. This generalizes dep_from/dep_to to up to
+// Domain::MAX_TOUCHES resources.
 template <typename Domain>
 void compute_dependencies(const std::vector<typename Domain::Item>& items,
                            int num_resources,
                            std::vector<int>& dep) {
     int n = items.size();
-    dep.assign(n, -1); // -1 means "no dependency, safe to run round 1"
+    dep.assign(n * Domain::MAX_TOUCHES, -1); // unused slots remain -1
 
     std::vector<int> last_toucher(num_resources, -1);
 
     for (int i = 0; i < n; i++) {
         int touched[Domain::MAX_TOUCHES];
         int count = Domain::touches(items[i], touched);
+        assert(count <= Domain::MAX_TOUCHES);
 
-        int nearest_dep = -1;
+        // One dependency per touched resource, not a merged dependency.
         for (int t = 0; t < count; t++) {
-            int prev = last_toucher[touched[t]];
-            if (prev > nearest_dep) nearest_dep = prev;
+            dep[i * Domain::MAX_TOUCHES + t] = last_toucher[touched[t]];
         }
-        dep[i] = nearest_dep;
 
         for (int t = 0; t < count; t++) {
             last_toucher[touched[t]] = i;
         }
     }
 }
-
-// Note: we simplified from "up to two dependencies" (dep_from/dep_to)
-// to "one nearest dependency" here - since dependencies are resolved
-// in index order, the SINGLE nearest earlier conflicting item is
-// always sufficient (by the time it commits, everything before it
-// that shares a resource has already committed too). This is a small
-// but genuine optimization we get for free by generalizing properly.
 
 template <typename Domain>
 __global__ void check_ready(const int* dep, int n,
@@ -62,7 +53,12 @@ __global__ void check_ready(const int* dep, int n,
     if (i >= n) return;
     if (committed[i]) { ready[i] = 0; return; }
 
-    ready[i] = (dep[i] == -1 || committed[dep[i]]) ? 1 : 0;
+    bool safe = true;
+    for (int t = 0; t < Domain::MAX_TOUCHES; t++) {
+        int d = dep[i * Domain::MAX_TOUCHES + t];
+        if (d != -1 && !committed[d]) { safe = false; break; }
+    }
+    ready[i] = safe ? 1 : 0;
 }
 
 template <typename Domain>
@@ -97,13 +93,13 @@ int run_occ_engine(const std::vector<typename Domain::Item>& items,
     int* d_total_committed;
 
     cudaMalloc(&d_items, n * sizeof(typename Domain::Item));
-    cudaMalloc(&d_dep, n * sizeof(int));
+    cudaMalloc(&d_dep, n * Domain::MAX_TOUCHES * sizeof(int));
     cudaMalloc(&d_committed, n * sizeof(int));
     cudaMalloc(&d_ready, n * sizeof(int));
     cudaMalloc(&d_total_committed, sizeof(int));
 
     cudaMemcpy(d_items, items.data(), n * sizeof(typename Domain::Item), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_dep, dep.data(), n * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_dep, dep.data(), n * Domain::MAX_TOUCHES * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemset(d_committed, 0, n * sizeof(int));
     cudaMemset(d_total_committed, 0, sizeof(int));
 
